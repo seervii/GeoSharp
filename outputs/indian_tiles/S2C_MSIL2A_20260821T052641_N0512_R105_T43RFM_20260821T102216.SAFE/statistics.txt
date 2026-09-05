@@ -1,0 +1,13 @@
+Tile: S2C_MSIL2A_20260821T052641_N0512_R105_T43RFM_20260821T102216.SAFE
+SR shape: (512, 512, 3)
+LR consistency mean: 0.008061
+LR consistency max: 0.083495
+LR consistency p95: 0.017045
+Uncertainty mean: 0.000136
+Uncertainty max: 0.007717
+Uncertainty p95: 0.000406
+Residual threshold: 0.014410
+Uncertainty threshold: 0.000275
+High-risk pixels: 5891
+Total pixels: 262144
+High-risk percentage: 2.25%
