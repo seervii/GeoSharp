@@ -1,0 +1,2 @@
+psnr_sr_vs_baseline: 19.9883
+ssim_sr_vs_baseline: 0.7729
