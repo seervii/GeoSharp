@@ -1,72 +1,363 @@
 """
-Evaluation metrics for comparing the sharpened output against a bicubic
-upsampling baseline (and, if available, a real high-res reference chip).
+GeoSharp Evaluation Metrics
 
-For the demo you mainly need:
-  - PSNR / SSIM of (LDSR-S2 output) vs (bicubic upsample of same tile)
-    to show the model is doing meaningfully better than naive upsampling.
+Compares the LDSR-S2 super-resolved output against
+a bicubic 4x upsampling baseline.
+
+Input:
+    128 x 128 x 4  (10m RGB-NIR)
+
+Output:
+    512 x 512 x 4  (2.5m RGB-NIR)
+
+Important:
+    Without a real 2.5m ground-truth image, PSNR/SSIM
+    here measure similarity between the AI output and
+    the bicubic baseline. They are NOT absolute accuracy
+    measurements.
 """
 
 import numpy as np
-from skimage.metrics import peak_signal_noise_ratio as psnr
-from skimage.metrics import structural_similarity as ssim
+
+from skimage.metrics import (
+    peak_signal_noise_ratio as psnr,
+    structural_similarity as ssim,
+)
+
 from skimage.transform import resize
 
 
-def bicubic_baseline(low_res: np.ndarray, scale_factor: int = 4) -> np.ndarray:
+# ============================================================
+# BICUBIC BASELINE
+# ============================================================
+
+def bicubic_baseline(
+    low_res: np.ndarray,
+    scale_factor: int = 4
+) -> np.ndarray:
     """
-    Naive bicubic upsampling baseline, to compare against the AI-sharpened
-    output. This is the "dumb" comparison point that shows the model is
-    adding real information, not just interpolating.
+    Upsample the low-resolution image using bicubic interpolation.
+
+    Example:
+        128 x 128 x 4
+            ↓ 4x
+        512 x 512 x 4
     """
-    h, w = low_res.shape[:2]
-    return resize(
+
+    if low_res.ndim != 3:
+        raise ValueError(
+            f"Expected image shape (H, W, C), "
+            f"got {low_res.shape}"
+        )
+
+    h, w, channels = low_res.shape
+
+    output = resize(
         low_res,
-        (h * scale_factor, w * scale_factor),
-        order=3,  # bicubic
+        (
+            h * scale_factor,
+            w * scale_factor,
+            channels
+        ),
+        order=3,
         anti_aliasing=True,
+        preserve_range=True,
+    )
+
+    return output.astype(np.float32)
+
+
+# ============================================================
+# PSNR
+# ============================================================
+
+def compute_psnr(
+    reference: np.ndarray,
+    comparison: np.ndarray
+) -> float:
+    """
+    Compute Peak Signal-to-Noise Ratio.
+
+    Higher = more similar.
+    """
+
+    reference = np.asarray(
+        reference,
+        dtype=np.float32
+    )
+
+    comparison = np.asarray(
+        comparison,
+        dtype=np.float32
+    )
+
+    if reference.shape != comparison.shape:
+        raise ValueError(
+            f"PSNR shape mismatch: "
+            f"{reference.shape} vs {comparison.shape}"
+        )
+
+    return float(
+        psnr(
+            reference,
+            comparison,
+            data_range=1.0
+        )
     )
 
 
-def compute_psnr(reference: np.ndarray, comparison: np.ndarray) -> float:
-    """Peak Signal-to-Noise Ratio. Higher is better."""
-    return psnr(reference, comparison, data_range=1.0)
+# ============================================================
+# SSIM
+# ============================================================
+
+def compute_ssim(
+    reference: np.ndarray,
+    comparison: np.ndarray
+) -> float:
+    """
+    Compute Structural Similarity Index.
+
+    Higher = more similar.
+    """
+
+    reference = np.asarray(
+        reference,
+        dtype=np.float32
+    )
+
+    comparison = np.asarray(
+        comparison,
+        dtype=np.float32
+    )
+
+    if reference.shape != comparison.shape:
+        raise ValueError(
+            f"SSIM shape mismatch: "
+            f"{reference.shape} vs {comparison.shape}"
+        )
+
+    return float(
+        ssim(
+            reference,
+            comparison,
+            channel_axis=-1,
+            data_range=1.0
+        )
+    )
 
 
-def compute_ssim(reference: np.ndarray, comparison: np.ndarray) -> float:
-    """Structural Similarity Index. Higher (closer to 1.0) is better."""
-    return ssim(reference, comparison, channel_axis=-1, data_range=1.0)
-
+# ============================================================
+# COMPLETE COMPARISON
+# ============================================================
 
 def compare_to_baseline(
     original_low_res: np.ndarray,
     sr_output: np.ndarray,
-    scale_factor: int = 4,
+    scale_factor: int = 4
 ) -> dict:
     """
-    Compute PSNR/SSIM of the SR output against a bicubic baseline, both
-    resized to match sr_output's shape.
+    Compare LDSR-S2 output against a bicubic baseline.
 
-    NOTE: without a real high-res ground-truth reference chip, this compares
-    SR output vs bicubic upsample directly rather than vs "truth" -- useful
-    for showing relative improvement, not absolute accuracy. Mention this
-    caveat if asked by judges.
+    Parameters
+    ----------
+    original_low_res:
+        Original 10m image.
+        Expected shape: (128, 128, 4)
+
+    sr_output:
+        GeoSharp/LDSR-S2 output.
+        Expected shape: (512, 512, 4)
+
+    scale_factor:
+        Super-resolution scale.
+        GeoSharp uses 4x -> 2.5m.
+
+    Returns
+    -------
+    dict:
+        PSNR and SSIM values.
     """
-    baseline = bicubic_baseline(original_low_res, scale_factor)
 
-    # Ensure shapes match (resize can be off by a pixel or two)
-    h, w = sr_output.shape[:2]
-    baseline = resize(baseline, (h, w), anti_aliasing=True)
+    original_low_res = np.asarray(
+        original_low_res,
+        dtype=np.float32
+    )
+
+    sr_output = np.asarray(
+        sr_output,
+        dtype=np.float32
+    )
+
+
+    # --------------------------------------------------------
+    # Validate input
+    # --------------------------------------------------------
+
+    if original_low_res.ndim != 3:
+
+        raise ValueError(
+            "original_low_res must have shape "
+            "(H, W, C). "
+            f"Got {original_low_res.shape}"
+        )
+
+
+    if sr_output.ndim != 3:
+
+        raise ValueError(
+            "sr_output must have shape "
+            "(H, W, C). "
+            f"Got {sr_output.shape}"
+        )
+
+
+    # --------------------------------------------------------
+    # Validate channels
+    # --------------------------------------------------------
+
+    if original_low_res.shape[2] != 4:
+
+        raise ValueError(
+            "Expected 4-channel Sentinel-2 input "
+            "(B02, B03, B04, B08), "
+            f"got {original_low_res.shape[2]} channels."
+        )
+
+
+    if sr_output.shape[2] != 4:
+
+        raise ValueError(
+            "Expected 4-channel SR output "
+            "(B02, B03, B04, B08), "
+            f"got {sr_output.shape[2]} channels."
+        )
+
+
+    # --------------------------------------------------------
+    # Create bicubic baseline
+    # --------------------------------------------------------
+
+    baseline = bicubic_baseline(
+        original_low_res,
+        scale_factor=scale_factor
+    )
+
+
+    # --------------------------------------------------------
+    # Match exact SR dimensions
+    # --------------------------------------------------------
+
+    target_h = sr_output.shape[0]
+    target_w = sr_output.shape[1]
+
+    if baseline.shape[:2] != (
+        target_h,
+        target_w
+    ):
+
+        baseline = resize(
+            baseline,
+            (
+                target_h,
+                target_w,
+                4
+            ),
+            order=3,
+            anti_aliasing=True,
+            preserve_range=True,
+        ).astype(np.float32)
+
+
+    # --------------------------------------------------------
+    # Safety clipping
+    # --------------------------------------------------------
+
+    baseline = np.clip(
+        baseline,
+        0.0,
+        1.0
+    )
+
+    sr_output = np.clip(
+        sr_output,
+        0.0,
+        1.0
+    )
+
+
+    # --------------------------------------------------------
+    # Calculate metrics
+    # --------------------------------------------------------
+
+    psnr_value = compute_psnr(
+        baseline,
+        sr_output
+    )
+
+    ssim_value = compute_ssim(
+        baseline,
+        sr_output
+    )
+
 
     return {
-        "psnr_sr_vs_baseline": compute_psnr(baseline, sr_output),
-        "ssim_sr_vs_baseline": compute_ssim(baseline, sr_output),
+        "psnr_sr_vs_baseline": psnr_value,
+        "ssim_sr_vs_baseline": ssim_value,
     }
 
 
+# ============================================================
+# QUICK TEST
+# ============================================================
+
 if __name__ == "__main__":
-    # Quick sanity check with random arrays
-    fake_low_res = np.random.rand(128, 128, 3).astype(np.float32)
-    fake_sr = np.random.rand(512, 512, 3).astype(np.float32)
-    results = compare_to_baseline(fake_low_res, fake_sr)
-    print(results)
+
+    print(
+        "Testing GeoSharp metrics..."
+    )
+
+    # Fake 4-channel Sentinel-2 input
+    fake_low_res = np.random.rand(
+        128,
+        128,
+        4
+    ).astype(np.float32)
+
+    # Fake 4x SR output
+    fake_sr = np.random.rand(
+        512,
+        512,
+        4
+    ).astype(np.float32)
+
+
+    results = compare_to_baseline(
+        fake_low_res,
+        fake_sr,
+        scale_factor=4
+    )
+
+
+    print(
+        "\nInput:",
+        fake_low_res.shape
+    )
+
+    print(
+        "SR output:",
+        fake_sr.shape
+    )
+
+    print(
+        "\nPSNR:",
+        f"{results['psnr_sr_vs_baseline']:.2f} dB"
+    )
+
+    print(
+        "SSIM:",
+        f"{results['ssim_sr_vs_baseline']:.3f}"
+    )
+
+    print(
+        "\n✓ Metrics test completed."
+    )

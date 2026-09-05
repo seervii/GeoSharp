@@ -1,268 +1,705 @@
 """
 GeoSharp inference module.
 
-Exposes ONE shared function that the rest of the pipeline (and the UI)
-depends on:
+Pipeline:
+    Sentinel-2 10m input
+        128 x 128 x 4
+              ↓
+        LDSR-S2 (4x)
+              ↓
+        512 x 512 x 4
+              ↓
+        GeoSharp 2.5m output
 
-    run_sr(tile_path: str) -> (output_image: np.ndarray, uncertainty_map: np.ndarray)
+Channels:
+    B02 = Blue
+    B03 = Green
+    B04 = Red
+    B08 = NIR
 
-While the real opensr-model integration is being wired up (GPU setup,
-checkpoint download, etc.), leave USE_PLACEHOLDER = True so the UI person
-can build and test against fake data. Flip it to False once opensr-model
-is confirmed working end-to-end.
+Final output:
+    (512, 512, 4)
+
+Uncertainty:
+    (512, 512)
 """
 
+import os
 import numpy as np
 
-USE_PLACEHOLDER = False  # flip to False once opensr-model is installed & tested
+USE_PLACEHOLDER = False
+
+_MODEL = None
+_DEVICE = None
 
 
 def _placeholder_run_sr(tile_path: str):
-    """Fake output so the UI can be built before the real model works."""
-    fake_output = np.random.rand(512, 512, 3).astype(np.float32)
-    fake_uncertainty = np.random.rand(512, 512).astype(np.float32)
+    """Fake output for UI testing."""
+
+    fake_output = np.random.rand(
+        512, 512, 4
+    ).astype(np.float32)
+
+    fake_uncertainty = np.random.rand(
+        512, 512
+    ).astype(np.float32)
+
     return fake_output, fake_uncertainty
-
-
-_MODEL = None  # module-level cache so we don't reload weights on every call
-_DEVICE = None
 
 
 def _get_model():
     """
-    Load the LDSR-S2 model + pretrained weights once, cache it for reuse.
+    Load LDSR-S2 model and pretrained weights once.
 
-    Confirmed API from https://github.com/ESAOpenSR/opensr-model (README,
-    checked Sep 2026):
+    Input:
+        (B, 4, H, W)
 
-        config = OmegaConf.load(<config_10m.yaml>)
-        model = opensr_model.SRLatentDiffusion(config, device=device)
-        model.load_pretrained(config.ckpt_version)
-        sr = model.forward(tensor, sampling_steps=100)
-
-    Input tensor shape is (B, 4, H, W) -- 4 channels = RGB-NIR, NOT plain
-    RGB. Default patch size is 128x128 -> upsampled to 512x512 (factor=4).
+    LDSR-S2 internally performs:
+        128x128x4 -> 512x512x4
     """
+
     global _MODEL, _DEVICE
+
+    # Reuse already loaded model
     if _MODEL is not None:
         return _MODEL, _DEVICE
 
-    import torch
     import requests
     from io import StringIO
     from omegaconf import OmegaConf
     import opensr_model
+    import torch
 
-    _DEVICE = "cuda" if torch.cuda.is_available() else "cpu"
-
-    # Config is fetched from the opensr-model repo directly (per their README)
-    config_url = (
-        "https://raw.githubusercontent.com/ESAOpenSR/opensr-model/"
-        "refs/heads/main/opensr_model/configs/config_10m.yaml"
+    # Select GPU if available
+    _DEVICE = (
+        "cuda"
+        if torch.cuda.is_available()
+        else "cpu"
     )
-    response = requests.get(config_url)
-    config = OmegaConf.load(StringIO(response.text))
 
-    model = opensr_model.SRLatentDiffusion(config, device=_DEVICE)
-    model.load_pretrained(config.ckpt_version)  # auto-downloads checkpoint
+    print(f"Using device: {_DEVICE}")
+
+    # Official ESA OpenSR configuration
+    config_url = (
+        "https://raw.githubusercontent.com/"
+        "ESAOpenSR/opensr-model/"
+        "refs/heads/main/"
+        "opensr_model/configs/config_10m.yaml"
+    )
+
+    response = requests.get(
+        config_url,
+        timeout=30
+    )
+
+    response.raise_for_status()
+
+    config = OmegaConf.load(
+        StringIO(response.text)
+    )
+
+    # Create model
+    model = opensr_model.SRLatentDiffusion(
+        config,
+        device=_DEVICE
+    )
+
+    # Load pretrained LDSR-S2 weights
+    model.load_pretrained(
+        config.ckpt_version
+    )
 
     _MODEL = model
+
+    print("LDSR-S2 model loaded successfully.")
+
     return _MODEL, _DEVICE
 
 
-def _real_run_sr(tile_path: str, sampling_steps: int = 100, patch_size: int = 128):
+def _real_run_sr(
+    tile_path: str,
+    sampling_steps: int = 100,
+    patch_size: int = 128
+):
     """
-    Real inference using the pretrained LDSR-S2 model via opensr-model.
+    Real LDSR-S2 inference.
 
-    Requires:
-        pip install opensr-model opensr-utils
-        (see requirements.txt for the CUDA 12.8 torch note if you're on
-        an RTX 50-series GPU)
+    Input:
+        128 x 128 x 4
 
-    NOTE: opensr-model's raw model expects a 4-channel (RGB-NIR) tensor,
-    NOT plain RGB -- if your tile only has RGB bands, you'll need a
-    placeholder/duplicate 4th channel or use a NIR band from the tile.
+    LDSR-S2:
+        4x super-resolution
 
-    IMPORTANT (demo scope -- "Option A"): opensr-model's raw
-    SRLatentDiffusion.forward() only handles small patches. Its internal
-    no-data-mask step allocates a (target_size x target_size) float array
-    where target_size = input_width * 4, so feeding it a full ~11000x11000
-    Sentinel-2 tile tries to allocate tens of GB and crashes. For the SIH
-    demo we read a single centered patch_size x patch_size patch directly
-    off disk via a windowed rasterio read (see preprocess.py's
-    read_center_patch_from_folder) -- the full-resolution raster is never
-    loaded into memory. Full-tile tiling/stitching via opensr-utils
-    (large_file_processing) is documented below as future work, since it
-    is far slower and doesn't have a built-in uncertainty map.
+    Final:
+        512 x 512 x 4
+
+    Resolution:
+        10m -> 2.5m
     """
-    import os
 
     import torch
     import rasterio
 
     try:
-        from pipeline.preprocess import read_center_patch_from_folder
+        from pipeline.preprocess import (
+            read_center_patch_from_folder
+        )
     except ImportError:
-        from preprocess import read_center_patch_from_folder
+        from preprocess import (
+            read_center_patch_from_folder
+        )
+
+    # =========================================================
+    # LOAD MODEL
+    # =========================================================
 
     model, device = _get_model()
 
-    # If given a folder of per-band files (e.g. a SAFE-style download with
-    # separate B02/B03/B04/B08 JP2s), read one centered patch directly
-    # off disk -- no full-tile array is ever created.
+    # =========================================================
+    # 1. READ 128x128 PATCH
+    # =========================================================
+
     if os.path.isdir(tile_path):
-        tile = read_center_patch_from_folder(tile_path, patch_size=patch_size)
-    else:
-        # Single-file tile: read a centered window the same way, so a
-        # large single GeoTIFF doesn't blow up memory either.
-        with rasterio.open(tile_path) as src:
-            h, w = src.height, src.width
-            if h < patch_size or w < patch_size:
-                raise ValueError(
-                    f"Tile is {w}x{h}, smaller than requested "
-                    f"patch_size={patch_size}."
-                )
-            from rasterio.windows import Window
 
-            row_off = (h - patch_size) // 2
-            col_off = (w - patch_size) // 2
-            window = Window(col_off, row_off, patch_size, patch_size)
-            tile = src.read(window=window)  # shape: (bands, patch_size, patch_size)
-
-    if tile.shape[0] < 4:
-        raise ValueError(
-            f"Expected at least 4 bands (RGB-NIR) for opensr-model, got "
-            f"{tile.shape[0]}. Check preprocess.py band selection."
+        tile = read_center_patch_from_folder(
+            tile_path,
+            patch_size=patch_size
         )
 
-    tensor = torch.from_numpy(tile[:4]).float().unsqueeze(0).to(device)  # (1,4,H,W)
+    else:
 
-    # Normalize to match training distribution if not already done in
-    # preprocess.py -- opensr-model expects reflectance-scale input.
-    # tensor = tensor / 10000.0  # uncomment if tile isn't pre-normalized
+        with rasterio.open(tile_path) as src:
 
-    # 2. Run inference on a single 128x128 patch.
+            h = src.height
+            w = src.width
+
+            if h < patch_size or w < patch_size:
+                raise ValueError(
+                    f"Tile is {w}x{h}, smaller than "
+                    f"requested patch_size={patch_size}."
+                )
+
+            from rasterio.windows import Window
+
+            # Center crop
+            row_off = (
+                h - patch_size
+            ) // 2
+
+            col_off = (
+                w - patch_size
+            ) // 2
+
+            window = Window(
+                col_off,
+                row_off,
+                patch_size,
+                patch_size
+            )
+
+            tile = src.read(
+                window=window
+            )
+
+    print(
+        f"Patch shape: {tile.shape}"
+    )
+
+    # =========================================================
+    # 2. VERIFY 4 BANDS
+    # =========================================================
+
+    if tile.shape[0] < 4:
+
+        raise ValueError(
+            f"Expected 4 bands "
+            f"(B02, B03, B04, B08), "
+            f"but got {tile.shape[0]}."
+        )
+
+    # EXACTLY FOUR CHANNELS:
+    #
+    # 0 = B02 Blue
+    # 1 = B03 Green
+    # 2 = B04 Red
+    # 3 = B08 NIR
+
+    tile = tile[:4]
+
+    # =========================================================
+    # 3. NORMALIZE REFLECTANCE
+    # =========================================================
+
+    tile = np.asarray(
+        tile,
+        dtype=np.float32
+    )
+
+    # If Sentinel-2 data is stored as
+    # integer DN values such as 0-10000,
+    # convert to reflectance.
+    #
+    # If already normalized 0-1,
+    # leave unchanged.
+
+    max_value = np.nanmax(tile)
+
+    if max_value > 2.0:
+
+        print(
+            "Input appears to be DN-scaled. "
+            "Converting to reflectance."
+        )
+
+        tile = tile / 10000.0
+
+    tile = np.nan_to_num(
+        tile,
+        nan=0.0,
+        posinf=1.0,
+        neginf=0.0
+    )
+
+    tile = np.clip(
+        tile,
+        0.0,
+        1.0
+    )
+
+    # =========================================================
+    # 4. CREATE MODEL TENSOR
+    # =========================================================
+
+    tensor = (
+        torch.from_numpy(tile)
+        .float()
+        .unsqueeze(0)
+        .to(device)
+    )
+
+    print(
+        f"Input tensor shape: "
+        f"{tuple(tensor.shape)}"
+    )
+
+    # Expected:
+    #
+    # (1, 4, 128, 128)
+
+    expected_input = (
+        1,
+        4,
+        patch_size,
+        patch_size
+    )
+
+    if tuple(tensor.shape) != expected_input:
+
+        raise RuntimeError(
+            f"Expected input tensor "
+            f"{expected_input}, "
+            f"got {tuple(tensor.shape)}"
+        )
+
+    # =========================================================
+    # 5. LDSR-S2 INFERENCE
+    # =========================================================
+
+    print(
+        f"Sampling steps: {sampling_steps}"
+    )
+
     with torch.no_grad():
-        sr = model.forward(tensor, sampling_steps=sampling_steps)
 
-    output_image = sr.squeeze(0).permute(1, 2, 0).cpu().numpy()  # (H,W,C)
-    output_image = output_image[:, :, :3]  # drop NIR for RGB display in UI
+        sr = model.forward(
+            tensor,
+            sampling_steps=sampling_steps
+        )
 
-    # 3. Uncertainty map: LDSR-S2 estimates this via multi-sample variance
-    #    (per the paper/demo.py in their repo) rather than a single
-    #    deterministic forward pass. Run forward() multiple times and take
-    #    the pixel-wise variance across samples as an uncertainty proxy.
-    #    Check their demo.py for the exact recommended sample count --
-    #    starting with 4 samples here as a reasonable default.
-    n_samples = 4
-    samples = [
-        model.forward(tensor, sampling_steps=sampling_steps)
-        .squeeze(0)[:3]
+    print(
+        f"LDSR raw output: "
+        f"{tuple(sr.shape)}"
+    )
+
+    # Expected:
+    #
+    # (1, 4, 512, 512)
+
+    if sr.ndim != 4:
+
+        raise RuntimeError(
+            f"Unexpected model output "
+            f"dimensions: {sr.shape}"
+        )
+
+    if sr.shape[1] < 4:
+
+        raise RuntimeError(
+            f"Expected 4-channel "
+            f"LDSR-S2 output, "
+            f"but received {sr.shape}."
+        )
+
+    # =========================================================
+    # 6. KEEP ALL FOUR CHANNELS
+    # =========================================================
+
+    sr = sr[:, :4]
+
+    # =========================================================
+    # IMPORTANT:
+    #
+    # DO NOT DOWNsample 512 -> 256.
+    #
+    # LDSR-S2 is already producing
+    # the required native 4x output.
+    #
+    # 128 pixels @ 10m
+    #       ↓
+    # 512 pixels @ 2.5m
+    # =========================================================
+
+    expected_sr = (
+        1,
+        4,
+        patch_size * 4,
+        patch_size * 4
+    )
+
+    if tuple(sr.shape) != expected_sr:
+
+        raise RuntimeError(
+            f"Expected LDSR output "
+            f"{expected_sr}, "
+            f"got {tuple(sr.shape)}"
+        )
+
+    print(
+        "✓ Native 4x LDSR output confirmed"
+    )
+
+    # =========================================================
+    # 7. CONVERT TO NUMPY
+    # =========================================================
+
+    output_image = (
+        sr
+        .squeeze(0)
+        .permute(1, 2, 0)
         .cpu()
         .numpy()
-        for _ in range(n_samples)
-    ]
-    uncertainty_map = np.var(np.stack(samples), axis=0).mean(axis=0)  # (H,W)
+        .astype(np.float32)
+    )
 
-    return output_image, uncertainty_map
-
-    # For a FULL tile (not just one 128x128 patch), use opensr-utils
-    # instead, which handles tiling/stitching/georeferencing:
+    # Expected:
     #
-    #   import opensr_utils
-    #   sr_job = opensr_utils.large_file_processing(
-    #       root=tile_path,
-    #       model=model,
-    #       window_size=(128, 128),
-    #       factor=4,
-    #       overlap=12,
-    #       eliminate_border_px=2,
-    #       device=device,
-    #       gpus=0,
-    #   )
-    #   # consult opensr-utils docs for how sr_job exposes the output
-    #   # array and whether it provides uncertainty directly
+    # (512, 512, 4)
+
+    expected_output = (
+        patch_size * 4,
+        patch_size * 4,
+        4
+    )
+
+    if output_image.shape != expected_output:
+
+        raise RuntimeError(
+            f"Final SR shape is "
+            f"{output_image.shape}, "
+            f"but expected "
+            f"{expected_output}."
+        )
+
+    # =========================================================
+    # 8. UNCERTAINTY ESTIMATION
+    # =========================================================
+
+    n_samples = 4
+
+    samples = []
+
+    print(
+        f"Generating {n_samples} "
+        f"stochastic samples for uncertainty..."
+    )
+
+    with torch.no_grad():
+
+        for i in range(n_samples):
+
+            sample = model.forward(
+                tensor,
+                sampling_steps=sampling_steps
+            )
+
+            # Keep four channels
+            sample = sample[:, :4]
+
+            # IMPORTANT:
+            # No 512 -> 256 downsampling.
+            #
+            # Keep native 512x512 output.
+
+            sample_np = (
+                sample
+                .squeeze(0)
+                .cpu()
+                .numpy()
+                .astype(np.float32)
+            )
+
+            samples.append(
+                sample_np
+            )
+
+            print(
+                f"Uncertainty sample "
+                f"{i + 1}/{n_samples}"
+            )
+
+    # Shape:
+    #
+    # (4 samples, 4 channels, 512, 512)
+
+    samples = np.stack(
+        samples,
+        axis=0
+    )
+
+    expected_samples = (
+        n_samples,
+        4,
+        patch_size * 4,
+        patch_size * 4
+    )
+
+    if samples.shape != expected_samples:
+
+        raise RuntimeError(
+            f"Unexpected uncertainty "
+            f"sample shape: {samples.shape}; "
+            f"expected {expected_samples}"
+        )
+
+    # =========================================================
+    # 9. CALCULATE UNCERTAINTY
+    # =========================================================
+
+    # Variance across stochastic samples
+    #
+    # Result before mean:
+    #     (4 channels, 512, 512)
+    #
+    # Then average across four bands:
+    #     (512, 512)
+
+    uncertainty_map = (
+        np.var(
+            samples,
+            axis=0
+        )
+        .mean(axis=0)
+        .astype(np.float32)
+    )
+
+    expected_uncertainty = (
+        patch_size * 4,
+        patch_size * 4
+    )
+
+    if uncertainty_map.shape != expected_uncertainty:
+
+        raise RuntimeError(
+            f"Uncertainty shape is "
+            f"{uncertainty_map.shape}, "
+            f"but expected "
+            f"{expected_uncertainty}."
+        )
+
+    # =========================================================
+    # 10. FINAL RESULT
+    # =========================================================
+
+    print()
+    print("=" * 60)
+    print("GeoSharp Inference Complete")
+    print("=" * 60)
+
+    print(
+        f"Input:       {tile.shape}"
+    )
+
+    print(
+        f"SR output:   {output_image.shape}"
+    )
+
+    print(
+        f"Uncertainty: {uncertainty_map.shape}"
+    )
+
+    print(
+        "Resolution:  10m -> 2.5m"
+    )
+
+    print("=" * 60)
+
+    return (
+        output_image,
+        uncertainty_map
+    )
 
 
-def run_sr(tile_path: str, sampling_steps: int = 30, patch_size: int = 128):
+def run_sr(
+    tile_path: str,
+    sampling_steps: int = 100,
+    patch_size: int = 128
+):
     """
-    Super-resolve a Sentinel-2 tile.
+    Main GeoSharp inference function.
 
-    Args:
-        tile_path: path to a Sentinel-2 tile (GeoTIFF or similar).
-        sampling_steps: diffusion sampling steps for LDSR-S2. The
-            opensr-model default/paper setting is 100, which is slow on
-            CPU (5 forward passes total: 1 output + 4 for the uncertainty
-            variance estimate). Default here is lowered to 30 for faster
-            demo iteration -- quality is somewhat softer but still fine
-            for a live pitch. Bump back to 100 for final result screenshots.
-        patch_size: side length of the square patch read from the tile
-            (default 128, matching opensr-model's expected input size).
+    Final resolution:
+        10m -> 2.5m
+
+    Final channels:
+        B02, B03, B04, B08
 
     Returns:
-        output_image: np.ndarray, sharpened RGB image
-        uncertainty_map: np.ndarray, per-pixel confidence/uncertainty map
-    """
-    if USE_PLACEHOLDER:
-        return _placeholder_run_sr(tile_path)
-    return _real_run_sr(tile_path, sampling_steps=sampling_steps, patch_size=patch_size)
+        output_image:
+            (512, 512, 4)
 
+        uncertainty_map:
+            (512, 512)
+    """
+
+    if USE_PLACEHOLDER:
+
+        return _placeholder_run_sr(
+            tile_path
+        )
+
+    return _real_run_sr(
+        tile_path,
+        sampling_steps=sampling_steps,
+        patch_size=patch_size
+    )
+
+
+# =============================================================
+# COMMAND LINE TEST
+# =============================================================
 
 if __name__ == "__main__":
-    # Quick manual test:
-    #   python pipeline/inference.py data/raw/tile1_bands/
-    #   python pipeline/inference.py data/raw/tile1_bands/ --steps 10   (fast preview)
-    #   python pipeline/inference.py data/raw/tile1_bands/ --steps 100 --patch-size 128  (final quality)
-    import argparse
-    import os
 
-    parser = argparse.ArgumentParser(description="Run GeoSharp super-resolution on a tile.")
-    parser.add_argument(
-        "tile_path", nargs="?", default="data/raw/sample_tile.tif",
-        help="Path to a tile file, or a folder of per-band SAFE-style files.",
+    import argparse
+
+    parser = argparse.ArgumentParser(
+        description=(
+            "GeoSharp 10m -> 2.5m "
+            "super-resolution"
+        )
     )
+
     parser.add_argument(
-        "--steps", type=int, default=30,
-        help="Diffusion sampling steps (default 30, fast demo preview; use 100 for final quality).",
+        "tile_path",
+        nargs="?",
+        default="data/raw/sample_tile.tif",
+        help=(
+            "Path to a tile file or folder "
+            "containing B02/B03/B04/B08 files."
+        )
     )
+
     parser.add_argument(
-        "--patch-size", type=int, default=128,
-        help="Square patch size read from the tile (default 128).",
+        "--steps",
+        type=int,
+        default=100,
+        help=(
+            "Diffusion sampling steps. "
+            "100 = final quality."
+        )
     )
+
     parser.add_argument(
-        "--out-dir", type=str, default="outputs",
-        help="Directory to save output PNGs into (default: outputs/).",
+        "--patch-size",
+        type=int,
+        default=128,
+        help=(
+            "Input patch size. "
+            "Default = 128."
+        )
     )
+
     parser.add_argument(
-        "--no-save", action="store_true",
-        help="Skip saving PNGs, just print array shapes (old behavior).",
+        "--no-save",
+        action="store_true",
+        help="Only print output shapes."
     )
+
     args = parser.parse_args()
 
-    out, unc = run_sr(args.tile_path, sampling_steps=args.steps, patch_size=args.patch_size)
-    print(f"Output shape: {out.shape}, Uncertainty shape: {unc.shape}")
+    # =========================================================
+    # RUN
+    # =========================================================
 
-    if not args.no_save:
-        os.makedirs(args.out_dir, exist_ok=True)
+    out, unc = run_sr(
+        args.tile_path,
+        sampling_steps=args.steps,
+        patch_size=args.patch_size
+    )
 
-        # 1. Sharpened output -> PNG. Values should already be roughly in
-        #    [0, 1] (reflectance-scale) but clip defensively before
-        #    converting to uint8.
-        from PIL import Image
+    print()
+    print("=" * 60)
+    print("GeoSharp Result")
+    print("=" * 60)
 
-        out_clipped = np.clip(out, 0.0, 1.0)
-        out_uint8 = (out_clipped * 255).astype(np.uint8)
-        sr_path = os.path.join(args.out_dir, "sr_output.png")
-        Image.fromarray(out_uint8).save(sr_path)
+    print(
+        f"Output shape:      {out.shape}"
+    )
 
-        # 2. Uncertainty map -> colored heatmap (brighter/hotter = higher
-        #    variance across the 4 diffusion samples = less confident).
-        import matplotlib.pyplot as plt
+    print(
+        f"Uncertainty shape: {unc.shape}"
+    )
 
-        unc_path = os.path.join(args.out_dir, "uncertainty_map.png")
-        plt.imsave(unc_path, unc, cmap="inferno")
+    # =========================================================
+    # HARD VALIDATION
+    # =========================================================
 
-        print(f"Saved sharpened output to: {sr_path}")
-        print(f"Saved uncertainty heatmap to: {unc_path}")
+    expected_output = (
+        args.patch_size * 4,
+        args.patch_size * 4,
+        4
+    )
 
+    expected_uncertainty = (
+        args.patch_size * 4,
+        args.patch_size * 4
+    )
 
+    assert out.shape == expected_output, (
+        f"Expected {expected_output}, "
+        f"got {out.shape}"
+    )
+
+    assert unc.shape == expected_uncertainty, (
+        f"Expected {expected_uncertainty}, "
+        f"got {unc.shape}"
+    )
+
+    print()
+    print(
+        "✓ 10m -> 2.5m conversion confirmed"
+    )
+
+    print(
+        "✓ 4-band RGB-NIR output confirmed"
+    )
+
+    print(
+        "✓ Final SR shape:",
+        out.shape
+    )
+
+    print(
+        "✓ Final uncertainty:",
+        unc.shape
+    )
