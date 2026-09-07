@@ -35,30 +35,21 @@ pip install -r requirements.txt
 No local GPU? Use the official `opensr-model` Google Colab notebooks
 instead (free GPU, no local install needed).
 
+## Model / checkpoint
+
+The app uses the GeoSharp fine-tuned LDSR-S2 checkpoint hosted on Hugging Face:
+
+`kapoorraaghav/geosharp-ldsrs2-worldstrat-x4`
+
+The first run downloads the approximately 2 GB checkpoint into the local Hugging Face cache. No Hugging Face token is required for this public repository.
+
+The LDSR-S2 architecture configuration is pinned locally at `configs/config_10m.yaml`, matching the OpenSR 10m configuration supplied for this build.
+
+The project keeps the same preprocessing and diagnostic stages: B02/B03/B04/B08 input, centered 128×128 patch, 4× reconstruction to 512×512, stochastic uncertainty, LR-consistency residual, and the conservative hallucination-risk intersection.
+
 ## API keys / credentials
 
-**opensr-model needs NO API key.** It's a local pretrained model —
-`model.load_pretrained()` auto-downloads the weights from HuggingFace the
-first time you run it. Just need internet access once.
-
-**Copernicus Data Space (only if scripting tile downloads) needs a
-username/password**, not an API key:
-
-1. Create a free account at https://dataspace.copernicus.eu/
-2. Copy `.env.example` to `.env`:
-   ```bash
-   cp .env.example .env
-   ```
-3. Fill in your real credentials in `.env`:
-   ```
-   COPERNICUS_USERNAME=your_email@example.com
-   COPERNICUS_PASSWORD=your_password
-   ```
-4. Never commit `.env` — it's already in `.gitignore`.
-
-If you'd rather skip scripting entirely, just download 1-3 tiles manually
-from https://browser.dataspace.copernicus.eu/ and drop them in
-`data/raw/` — no credentials needed in code at all for that path.
+opensr-model and the Hugging Face model do not require an application API key for this public-inference path. Copernicus credentials are only needed by the optional tile-download scripts.
 
 ## How to run
 
@@ -78,17 +69,8 @@ streamlit run app/main.py
 This opens a browser tab (usually `http://localhost:8501`) where you can
 upload a tile and see original / sharpened / uncertainty side-by-side.
 
-**3. Switch from placeholder to real model:**
-Open `pipeline/inference.py`, change:
-```python
-USE_PLACEHOLDER = True
-```
-to
-```python
-USE_PLACEHOLDER = False
-```
-Nothing else needs to change — the UI already calls `run_sr()` and
-doesn't care which implementation runs underneath.
+**3. Fine-tuned model loading:**
+The default `pipeline/inference.py` loads the ESA LDSR-S2 architecture, then overlays the GeoSharp fine-tuned `ldsrs2_worldstrat_x4_best.pt` checkpoint from Hugging Face. The model is cached for the lifetime of the Streamlit process.
 
 ## Repo structure
 
@@ -147,3 +129,7 @@ this whole space addresses. For the prototype we compare against a bicubic
 upsampling baseline to show the model adds real information beyond naive
 interpolation. For Phase 2 training, Cartosat-3 (ISRO/NRSC Bhuvan) is the
 planned high-res reference for building training pairs.
+
+## Important resolution note
+
+This checkpoint/configuration is an x4 super-resolution model: 128×128 LR → 512×512 SR, corresponding to 10m → 2.5m imagery. The project code and checkpoint metadata support 4×, not 5×.

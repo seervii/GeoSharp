@@ -1,0 +1,88 @@
+# =========================
+# GeoSharp / Python
+# =========================
+
+# Python cache / compiled files
+__pycache__/
+*.py[cod]
+*$py.class
+*.pyo
+
+# Virtual environments
+.venv/
+venv/
+env/
+ENV/
+
+# Environment / secrets
+.env
+.env.*
+!.env.example
+*.secret
+
+# IDE / OS
+.vscode/
+.idea/
+.DS_Store
+Thumbs.db
+
+# Jupyter
+.ipynb_checkpoints/
+
+# =========================
+# GeoSharp generated data
+# =========================
+
+# Runtime outputs / generated images / arrays
+outputs/
+
+# Uploaded / test data
+app/data/raw/
+app/data/uploads/
+
+# Temporary files
+tmp/
+temp/
+*.tmp
+
+# Raster / satellite data generated locally
+*.tif
+*.tiff
+*.jp2
+*.SAFE/
+*.zip
+
+# NumPy / model-generated artifacts
+*.npy
+*.npz
+
+# =========================
+# Model checkpoints
+# Keep checkpoints out of Git.
+# Download/load them at runtime instead.
+# =========================
+*.ckpt
+*.pt
+*.pth
+*.safetensors
+
+# =========================
+# Logs
+# =========================
+*.log
+logs/
+
+# =========================
+# Local Streamlit / tooling
+# =========================
+.streamlit/secrets.toml
+
+# macOS
+.AppleDouble
+.LSOverride
+._*
+
+# Large model files
+*.ckpt
+*.pt
+*.pth
