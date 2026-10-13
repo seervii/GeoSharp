@@ -1,4 +1,4 @@
-# GeoSharp — SIH 2026 Prototype
+# GeoSharp
 
 AI super-resolution of Sentinel-2 satellite imagery (10m -> sub-4m), with a
 per-pixel confidence/uncertainty map showing reconstructed vs. observed detail.
@@ -113,23 +113,6 @@ Work on your own branch (e.g. `friend-inference`, `your-ui`), merge into
 ```bash
 streamlit run app/main.py
 ```
-
-## Judges' Q&A prep
-
-**"Did you train this yourselves?"**
-No — the prototype runs on a pretrained model (LDSR-S2, IEEE JSTARS 2025)
-for inference. Our contribution is the end-to-end applied pipeline:
-Sentinel-2 ingestion, evaluation harness, and a usable interface for
-disaster-response/agricultural use cases. The full custom hybrid
-CNN-Transformer architecture is the proposed Phase 2 build.
-
-**"Where's your ground truth?"**
-No native <4m Sentinel-2 ground truth exists — that's the core problem
-this whole space addresses. For the prototype we compare against a bicubic
-upsampling baseline to show the model adds real information beyond naive
-interpolation. For Phase 2 training, Cartosat-3 (ISRO/NRSC Bhuvan) is the
-planned high-res reference for building training pairs.
-
 ## Important resolution note
 
 This checkpoint/configuration is an x4 super-resolution model: 128×128 LR → 512×512 SR, corresponding to 10m → 2.5m imagery. The project code and checkpoint metadata support 4×, not 5×.
