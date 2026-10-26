@@ -80,6 +80,10 @@ pip install -r requirements.txt
 Launch the Streamlit interface to test your changes:
 ```bash
 streamlit run app.py
+```
+- Implement your changes or bug fixes.
+- Test your changes by running an inference pass on a sample low-resolution image to ensure the LDSR pipeline executes without errors.
+- Format your Python code cleanly (following PEP 8 conventions).
 
 #### 6. Commit & Push
 Write concise, descriptive commit messages:
